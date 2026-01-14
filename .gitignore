@@ -1,0 +1,65 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+
+# Env files
+.env
+.env.*
+
+# IDEs and editors
+.vscode/
+.idea/
+
+# Pytest
+.pytest_cache/
+
+# Coverage and testing
+.coverage
+htmlcov/
+
+# Mypy
+.mypy_cache/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# SQLite
+*.sqlite3
+*.db
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Misc
+*.pem
+*.key
+
+# Templates / outputs
+__pycache__/
+*.pyc
+
+# Ignore secrets file
+secrets.json

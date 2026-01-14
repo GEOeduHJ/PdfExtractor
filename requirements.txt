@@ -1,0 +1,15 @@
+Flask
+pdfplumber
+PyPDF2
+python-docx
+langdetect
+spacy
+kss
+pytesseract
+pdf2image
+Pillow
+uvicorn
+asgiref
+pymupdf
+transformers
+sentencepiece
