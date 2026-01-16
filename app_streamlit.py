@@ -1,6 +1,8 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import re
 import io
+import json
 
 
 def secure_filename(filename: str) -> str:
@@ -31,6 +33,44 @@ st.set_page_config(page_title="PDF 텍스트 추출기 (Streamlit)", layout="cen
 
 st.title("PDF 텍스트 추출기")
 st.markdown("PDF 파일을 업로드하면 내부 텍스트를 추출하고 다운로드하거나 번역할 수 있습니다.")
+
+# Copyable prompt UI
+PROMPT_COPY = """
+---
+이 논문 내용 원본 그대로 실제 논문구조로 정리.
+절 제목과 본문 내용을 나누어서 정리.
+참고문헌 부분은 논문별로 줄바꿔서 정리.
+
+원본파일에서 문장 단위로 줄 바꿈 실행
+---
+"""
+
+with st.expander('프롬프트 복사하기'):
+    html = """
+    <div>
+        <style>textarea#prompt{width:100%;height:160px;padding:8px;box-sizing:border-box;font-size:14px;}</style>
+        <label for="prompt">아래 프롬프트를 복사하여 사용하세요.</label>
+        <textarea id="prompt" readonly></textarea>
+        <div style="margin-top:8px;"><button id="copyBtn">프롬프트 복사</button></div>
+    </div>
+    <script>
+    const promptText = PLACEHOLDER;
+    document.getElementById('prompt').textContent = promptText;
+    const btn = document.getElementById('copyBtn');
+    btn.addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(promptText);
+            btn.textContent = '복사됨 ✓';
+            setTimeout(() => btn.textContent = '프롬프트 복사', 2000);
+        } catch (e) {
+            alert('복사 실패: 브라우저에서 클립보드 권한을 허용해주세요.');
+        }
+    });
+    </script>
+    """
+    # Safely embed the prompt text as a JS string literal
+    html = html.replace('PLACEHOLDER', json.dumps(PROMPT_COPY))
+    components.html(html, height=260)
 
 uploaded = st.file_uploader("PDF 파일 업로드", type=["pdf"])
 
