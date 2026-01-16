@@ -1,36 +1,17 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-간단한 Flask 웹앱: PDF 파일을 업로드하면 내부 텍스트를 추출합니다.
-- 텍스트 추출: pdfplumber 사용 (없으면 PyPDF2로 폴백)
-- HTML 폼에서 업로드 후 추출된 텍스트를 화면에 표시하고 .txt로 다운로드 가능
-- API 엔드포인트: POST /api/extract (multipart/form-data, key: file)
+Core PDF extraction and translation helpers used by the Streamlit UI.
 
-주의: 이미지 기반(스캔) PDF는 OCR(예: Tesseract)이 필요합니다.
+This module focuses on page-based extraction (PyMuPDF preferred) and
+post-processing helpers used by `app_streamlit.py`.
 """
-
-from flask import Flask, request, render_template, jsonify, send_file
 import io
-import base64
 import os
 import re
-from werkzeug.utils import secure_filename
 import statistics
-import uuid
-import time
 
-# 라이브러리 로드 (있으면 사용)
-try:
-    import pdfplumber
-    HAVE_PDFPLUMBER = True
-except Exception:
-    HAVE_PDFPLUMBER = False
-
-try:
-    from PyPDF2 import PdfReader
-    HAVE_PYPDF2 = True
-except Exception:
-    HAVE_PYPDF2 = False
+# PyMuPDF is the primary extractor for this repo (preferred for layout-aware extraction)
 
 # python-docx 지원 여부
 try:
@@ -39,64 +20,21 @@ try:
 except Exception:
     HAVE_DOCX = False
 
-# ASGI 래퍼 사용 가능 여부 (uvicorn으로 실행할 때 필요)
-try:
-    from asgiref.wsgi import WsgiToAsgi
-    HAVE_ASGIREF = True
-except Exception:
-    HAVE_ASGIREF = False
-
-app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 최대 업로드 50MB
-ALLOWED_EXTENSIONS = {'pdf'}
-
-# ASGI 앱 (asgiref가 있으면 uvicorn으로 실행 가능)
-if HAVE_ASGIREF:
-    asgi_app = WsgiToAsgi(app)
-else:
-    asgi_app = None
+# This module exposes extraction and translation helpers for the Streamlit UI.
 
 
-def allowed_file(filename: str) -> bool:
-    return bool(filename and '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS)
+
 
 
 def extract_text_from_pdf_bytes(pdf_bytes: bytes) -> str:
     """PDF 바이너리에서 텍스트를 추출해 문자열로 반환합니다.
     pdfplumber 우선, 실패하면 PyPDF2로 폴백합니다. 텍스트가 없으면 빈 문자열을 반환합니다.
     """
-    text_parts = []
-
-    # pdfplumber 사용 시도
-    if HAVE_PDFPLUMBER:
-        try:
-            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text_parts.append(page_text)
-            if text_parts:
-                return '\n\n'.join(text_parts)
-        except Exception:
-            # pdfplumber 처리 중 오류 발생하면 폴백 시도
-            pass
-
-    # PyPDF2 폴백
-    if HAVE_PYPDF2:
-        try:
-            reader = PdfReader(io.BytesIO(pdf_bytes))
-            for page in reader.pages:
-                try:
-                    page_text = page.extract_text()
-                except Exception:
-                    page_text = None
-                if page_text:
-                    text_parts.append(page_text)
-            if text_parts:
-                return '\n\n'.join(text_parts)
-        except Exception:
-            pass
-
+    # Use the page-based extractor (PyMuPDF-preferred). Returns combined page texts.
+    pages = extract_pages_from_pdf_bytes(pdf_bytes)
+    if pages:
+        parts = [p.get('text', '') for p in pages]
+        return '\n\n'.join(parts)
     return ''
 
 
@@ -299,55 +237,193 @@ def extract_pages_from_pdf_bytes(pdf_bytes: bytes) -> list:
         except Exception:
             pass
 
-    # 2) pdfplumber 폴백
-    if HAVE_PDFPLUMBER:
-        try:
-            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-                for page in pdf.pages:
-                    try:
-                        # pdfplumber에서 words를 얻어서 reflow 시도
-                        try:
-                            words = page.extract_words()
-                        except Exception:
-                            words = None
-
-                        if words:
-                            try:
-                                text = reflow_from_word_tuples(words)
-                            except Exception:
-                                text = page.extract_text() or ''
-                        else:
-                            text = page.extract_text() or ''
-                    except Exception:
-                        text = ''
-                    try:
-                        has_images = bool(getattr(page, 'images', None))
-                    except Exception:
-                        has_images = False
-                    pages.append({'text': text, 'has_images': has_images})
-            if pages:
-                return pages
-        except Exception:
-            pass
-
-    # 3) PyPDF2 폴백 (이미지 검출은 복잡하므로 False 처리)
-    if HAVE_PYPDF2:
-        try:
-            reader = PdfReader(io.BytesIO(pdf_bytes))
-            num_pages = len(reader.pages)
-            for i in range(num_pages):
-                try:
-                    page = reader.pages[i]
-                    text = page.extract_text() or ''
-                except Exception:
-                    text = ''
-                pages.append({'text': text, 'has_images': False})
-            if pages:
-                return pages
-        except Exception:
-            pass
-
     return pages
+
+
+def extract_structured_from_pdf_bytes(pdf_bytes: bytes, sample_pages: int = 8) -> list:
+    """논문/레이아웃 문서용 구조화 추출(프로토타입).
+
+    반환값: [{'page': int, 'body_text': str, 'headers': [str], 'footers': [str],
+             'page_number': int|None, 'footnotes': [str], 'has_images': bool}, ...]
+
+    동작:
+    - PyMuPDF(`fitz`) 기반으로 페이지의 spans/words를 수집
+    - 문서 전반에 걸쳐 반복되는 상단/하단 텍스트를 헤더/푸터로 간주하여 본문에서 제거
+    - 하단의 작은 폰트 텍스트를 푸트노트(footnote)로 수집
+    - 본문은 `get_text('words')` 결과에서 헤더/푸터/푸트노트 영역을 제외한 단어들로 재조합
+
+    주: 휴리스틱 기반 프로토타입이며 모든 저널 레이아웃에서 완벽하지 않습니다.
+    """
+    if not HAVE_PYMUPDF:
+        # fallback: return simple structure using existing extractor
+        pages = extract_pages_from_pdf_bytes(pdf_bytes)
+        out = []
+        for i, p in enumerate(pages):
+            out.append({
+                'page': i + 1,
+                'body_text': p.get('text', ''),
+                'headers': [],
+                'footers': [],
+                'page_number': None,
+                'footnotes': [],
+                'has_images': p.get('has_images', False),
+            })
+        return out
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    except Exception:
+        return []
+
+    page_count = doc.page_count
+    sample_n = min(sample_pages, page_count)
+
+    # Collect repeated top/bottom spans as header/footer candidates
+    header_candidates = {}
+    footer_candidates = {}
+    for i in range(sample_n):
+        p = doc[i]
+        ph = p.rect.height
+        try:
+            d = p.get_text('dict')
+        except Exception:
+            d = {}
+        for block in d.get('blocks', []):
+            for line in block.get('lines', []):
+                for span in line.get('spans', []):
+                    text = span.get('text', '').strip()
+                    if not text:
+                        continue
+                    bbox = span.get('bbox', [])
+                    y0 = bbox[1] if len(bbox) >= 4 else 0
+                    if y0 < ph * 0.12:
+                        header_candidates[text] = header_candidates.get(text, 0) + 1
+                    if y0 > ph * 0.88:
+                        footer_candidates[text] = footer_candidates.get(text, 0) + 1
+
+    thr = max(1, int(0.6 * sample_n))
+    headers_common = {t for t, c in header_candidates.items() if c >= thr}
+    footers_common = {t for t, c in footer_candidates.items() if c >= thr}
+
+    structured = []
+    for i in range(page_count):
+        p = doc[i]
+        ph = p.rect.height
+
+        # spans (for sizes and bbox) and words (for precise coordinates)
+        try:
+            d = p.get_text('dict')
+        except Exception:
+            d = {}
+        spans = []
+        sizes = []
+        for block in d.get('blocks', []):
+            for line in block.get('lines', []):
+                for span in line.get('spans', []):
+                    spans.append(span)
+                    sz = span.get('size', None)
+                    if sz:
+                        sizes.append(sz)
+
+        median_size = statistics.median(sizes) if sizes else None
+
+        # detect footnote-like spans: smaller-than-median fonts located near bottom
+        footnote_texts = []
+        footnote_bbox_ys = []
+        for span in spans:
+            text = span.get('text', '').strip()
+            if not text:
+                continue
+            bbox = span.get('bbox', [])
+            if len(bbox) < 4:
+                continue
+            y0 = bbox[1]
+            y1 = bbox[3]
+            size = span.get('size', 0) or 0
+            if median_size and size and size < median_size * 0.85 and y0 > ph * 0.75:
+                footnote_texts.append(text)
+                footnote_bbox_ys.append((y0, y1))
+
+        # identify headers/footers on this page and page number
+        headers = []
+        footers = []
+        page_number = None
+        for span in spans:
+            text = span.get('text', '').strip()
+            if not text:
+                continue
+            bbox = span.get('bbox', [])
+            if len(bbox) < 4:
+                continue
+            y0 = bbox[1]
+            x0 = bbox[0]
+            x1 = bbox[2]
+            # header/footer matching
+            if text in headers_common and y0 < ph * 0.12:
+                headers.append(text)
+            if text in footers_common and y0 > ph * 0.88:
+                footers.append(text)
+            # page number heuristic: small integer near bottom center
+            if re.fullmatch(r'\d{1,4}', text):
+                cx = (x0 + x1) / 2.0
+                pw = p.rect.width
+                if y0 > ph * 0.78 and abs(cx - pw / 2.0) < pw * 0.25:
+                    try:
+                        page_number = int(text)
+                    except Exception:
+                        page_number = None
+
+        # build exclusion ranges (y ranges) for headers/footers/footnotes
+        exclude_y_ranges = []
+        for span in spans:
+            text = span.get('text', '').strip()
+            bbox = span.get('bbox', [])
+            if len(bbox) < 4:
+                continue
+            y0 = bbox[1]
+            y1 = bbox[3]
+            if text in headers_common and y0 < ph * 0.12:
+                exclude_y_ranges.append((0, y1 + 1))
+            if text in footers_common and y0 > ph * 0.88:
+                exclude_y_ranges.append((y0 - 1, ph))
+        for y0, y1 in footnote_bbox_ys:
+            exclude_y_ranges.append((max(0, y0 - 1), min(ph, y1 + 1)))
+
+        def in_excluded(y: float) -> bool:
+            for a, b in exclude_y_ranges:
+                if y >= a and y <= b:
+                    return True
+            return False
+
+        # filter words using excluded y ranges
+        try:
+            words = p.get_text('words')  # list of tuples
+        except Exception:
+            words = []
+
+        filtered_words = []
+        for w in words:
+            # PyMuPDF word tuple: (x0, y0, x1, y1, 'word', block_no, line_no, word_no)
+            if len(w) < 5:
+                continue
+            y0 = float(w[1])
+            if in_excluded(y0):
+                continue
+            filtered_words.append(w)
+
+        body_text = reflow_from_word_tuples(filtered_words)
+
+        structured.append({
+            'page': i + 1,
+            'body_text': body_text,
+            'headers': headers,
+            'footers': footers,
+            'page_number': page_number,
+            'footnotes': footnote_texts,
+            'has_images': bool(p.get_images(full=True)),
+        })
+
+    return structured
 
 
 def normalize_extracted_text(text: str) -> str:
@@ -473,249 +549,7 @@ def reflow_and_segment(text: str) -> str:
     return '\n\n'.join(out_paras)
 
 
-@app.route('/', methods=['GET'])
-def index():
-    return render_template('index.html')
 
-
-@app.route('/extract', methods=['POST'])
-def extract():
-    # 파일 존재 확인
-    if 'file' not in request.files:
-        return render_template('index.html', error='파일이 업로드되지 않았습니다.')
-
-    file = request.files['file']
-    raw_filename = file.filename or ''
-
-    if raw_filename == '':
-        return render_template('index.html', error='파일이 선택되지 않았습니다.')
-
-    if not allowed_file(raw_filename):
-        return render_template('index.html', error='허용되는 파일 형식은 PDF(.pdf)만 가능합니다.')
-
-    filename = secure_filename(raw_filename)
-
-    try:
-        pdf_bytes = file.read()
-        # 페이지별로 추출 (각 페이지는 dict: {'text', 'has_images'})
-        pages = extract_pages_from_pdf_bytes(pdf_bytes)
-
-        # OCR 폴백: 텍스트가 전혀 없으면 OCR 시도
-        if not pages or all((p.get('text','').strip() == '' for p in pages)):
-            ocr_pages = ocr_pdf_bytes(pdf_bytes)
-            if ocr_pages:
-                pages = ocr_pages
-
-        # 페이지 리스트에서 텍스트만 추출하여 리플로우+문장분할 적용
-        normalized_pages = [reflow_and_segment(p.get('text', '')) for p in pages]
-
-        # apply URL/DOI fixes to each page
-        normalized_pages = [fix_urls_and_dois(p) for p in normalized_pages]
-
-        # 전체 합친 텍스트 (다운로드용) -- 페이지 구분 및 이미지 마커 포함
-        merged_parts = []
-        for i, p in enumerate(pages):
-            page_text = normalized_pages[i] if i < len(normalized_pages) else ''
-            merged_parts.append(f"=== 페이지 {i+1} ===")
-            if page_text:
-                merged_parts.append(page_text)
-            if p.get('has_images'):
-                # 이미지/표 마커와 위아래 공백 한 줄 추가
-                merged_parts.append('\n[이미지 또는 표가 포함되어 있습니다]\n')
-        normalized_text = '\n\n'.join(merged_parts)
-
-        # apply URL/DOI fixes to full text as well
-        normalized_text = fix_urls_and_dois(normalized_text)
-
-        if not any([tp for tp in normalized_pages if tp.strip() != '']):
-            msg = 'PDF에서 텍스트를 추출하지 못했습니다. 이 PDF가 이미지 기반(스캔)인 경우 OCR이 필요합니다.'
-            return render_template('index.html', error=msg)
-
-        # 웹에서 사용하기 위해 base64로 인코딩 (다운로드 링크로 사용)
-        b64 = base64.b64encode(normalized_text.encode('utf-8')).decode('ascii')
-        download_filename = os.path.splitext(filename)[0] + '.txt'
-        download_docx_filename = os.path.splitext(filename)[0] + '.docx'
-
-        # 템플릿에는 페이지별 텍스트(정규화된)와 각 페이지의 이미지 여부를 전달
-        extracted_pages_text = normalized_pages
-        extracted_pages_meta = [p.get('has_images', False) for p in pages]
-
-        # Create in-memory outputs for download (only full TXT). Remove DOCX and per-page artifacts per request.
-        download_id = uuid.uuid4().hex
-        store_entry = {'created': time.time(), 'filename_base': os.path.splitext(filename)[0]}
-        # full text bytes (only this will be stored)
-        txt_bytes = normalized_text.encode('utf-8')
-        store_entry['txt'] = txt_bytes
-
-        # Do not generate DOCX or per-page files anymore
-        store_entry['docx'] = None
-        store_entry['pages'] = None
-
-        DOWNLOAD_STORE[download_id] = store_entry
-
-        return render_template('index.html', extracted_text=normalized_text, extracted_pages=extracted_pages_text, extracted_pages_has_images=extracted_pages_meta, download_id=download_id, download_filename=download_filename)
-
-    except Exception as e:
-        return render_template('index.html', error=f'텍스트 추출 중 오류가 발생했습니다: {e}')
-
-
-@app.route('/api/extract', methods=['POST'])
-def api_extract():
-    """API 엔드포인트: multipart/form-data로 PDF 파일을 전송하면 JSON으로 추출 결과를 반환합니다."""
-    if 'file' not in request.files:
-        return jsonify(success=False, error='file not provided'), 400
-
-    file = request.files['file']
-    raw_filename = file.filename or ''
-
-    if raw_filename == '':
-        return jsonify(success=False, error='no filename'), 400
-
-    if not allowed_file(raw_filename):
-        return jsonify(success=False, error='file extension not allowed'), 400
-
-    try:
-        pdf_bytes = file.read()
-        pages = extract_pages_from_pdf_bytes(pdf_bytes)
-        # OCR 폴백: 텍스트가 전혀 없으면 OCR 시도
-        if not pages or all((p.get('text','').strip() == '' for p in pages)):
-            ocr_pages = ocr_pdf_bytes(pdf_bytes)
-            if ocr_pages:
-                pages = ocr_pages
-
-        normalized_pages = [reflow_and_segment(p.get('text','')) for p in pages]
-        # include has_images in response
-        pages_info = [{'text': normalized_pages[i] if i < len(normalized_pages) else '', 'has_images': pages[i].get('has_images', False)} for i in range(len(pages))]
-        normalized_text = '\n\n'.join([f"=== 페이지 {i+1} ===\n{pages_info[i]['text']}" + ("\n\n[이미지 또는 표가 포함되어 있습니다]" if pages_info[i]['has_images'] else '') for i in range(len(pages_info))])
-
-        return jsonify(success=True, pages=pages_info, text=normalized_text), 200
-    except Exception as e:
-        return jsonify(success=False, error=str(e)), 500
-
-
-@app.route('/download_docx', methods=['POST'])
-def download_docx():
-    """POST 폼으로 전달된 텍스트를 docx로 만들어 다운로드합니다.
-    폼 인자:
-      - text: 전체 텍스트(또는 단일 페이지 텍스트)
-      - filename: 출력 파일명
-      - has_images (선택): '1' 또는 '0' (단일 페이지 다운로드용)
-    """
-    if not HAVE_DOCX:
-        return render_template('index.html', error='python-docx 라이브러리가 설치되어 있지 않습니다. requirements.txt에 python-docx를 추가하고 설치하세요.')
-
-    text = request.form.get('text', '')
-    filename = request.form.get('filename') or 'extracted.docx'
-    filename = secure_filename(filename)
-    has_images_flag = request.form.get('has_images')
-
-    if not text:
-        return render_template('index.html', error='DOCX로 변환할 텍스트가 없습니다.')
-
-    doc = Document()
-
-    # 문단 단위로 분리하여 docx에 추가
-    # 페이지 헤더(=== 페이지 N ===)는 굵게 표시
-    for para in re.split(r'\n{2,}', text):
-        p = para.strip()
-        if not p:
-            continue
-        # 내부의 단일/다중 줄바꿈은 공백으로 바꿔서 문단 내 줄바꿈이 실제 단락으로 들어가지 않게 함
-        p = re.sub(r'\n+', ' ', p)
-        # 페이지 헤더 감지
-        m = re.match(r'^===\s*페이지\s*(\d+)\s*===', p)
-        if m:
-            hdr = doc.add_paragraph()
-            run = hdr.add_run(p)
-            run.bold = True
-            continue
-        if '[이미지 또는 표가 포함되어 있습니다]' in p:
-            # 위아래 한 줄 공백 추가 대신 단일 이탤릭 문단으로 추가
-            img_p = doc.add_paragraph()
-            img_run = img_p.add_run('[이미지 또는 표가 포함되어 있습니다]')
-            img_run.italic = True
-            continue
-        # 일반 문단
-        doc.add_paragraph(p)
-
-    bio = io.BytesIO()
-    doc.save(bio)
-    bio.seek(0)
-
-    return send_file(
-        bio,
-        as_attachment=True,
-        download_name=filename,
-        mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    )
-
-
-@app.errorhandler(413)
-def request_entity_too_large(e):
-    return render_template('index.html', error='파일 크기가 너무 큽니다 (최대 50MB).'), 413
-
-
-# OCR support (pytesseract + pdf2image)
-try:
-    import pytesseract
-    HAVE_PYTESSERACT = True
-except Exception:
-    HAVE_PYTESSERACT = False
-
-try:
-    from pdf2image import convert_from_bytes
-    HAVE_PDF2IMAGE = True
-except Exception:
-    HAVE_PDF2IMAGE = False
-
-try:
-    from PIL import Image
-    HAVE_PIL = True
-except Exception:
-    HAVE_PIL = False
-
-
-def ocr_pdf_bytes(pdf_bytes: bytes) -> list:
-    """PDF 바이트를 이미지로 변환한 뒤 pytesseract로 페이지별 텍스트를 추출합니다.
-    반환: [{'text': str, 'has_images': True}, ...]
-    주의: 시스템에 Tesseract 바이너리 설치가 필요합니다.
-    """
-    pages = []
-    if not (HAVE_PYTESSERACT and HAVE_PDF2IMAGE and HAVE_PIL):
-        return pages
-
-    try:
-        images = convert_from_bytes(pdf_bytes)
-        for img in images:
-            try:
-                text = pytesseract.image_to_string(img)
-            except Exception:
-                text = ''
-            pages.append({'text': text or '', 'has_images': True})
-    except Exception:
-        return []
-
-    return pages
-
-
-# In-memory store for generated download artifacts (bytes). Keys are UUID hex strings.
-# Note: this is process-local and ephemeral. For production use a persistent store (Redis, S3, filesystem).
-DOWNLOAD_STORE = {}
-# Optional expiry (seconds) for entries — not enforced automatically here but available for future cleanup logic.
-DOWNLOAD_EXPIRY_SECONDS = 3600
-
-
-@app.route('/download_file/<download_id>', methods=['GET'])
-def download_file(download_id):
-    """Serve stored generated TXT output by id. Other formats removed per request."""
-    ent = DOWNLOAD_STORE.get(download_id)
-    if not ent:
-        return render_template('index.html', error='요청하신 파일을 찾을 수 없습니다 (만료되었거나 잘못된 ID).'), 404
-
-    # Only txt is supported now
-    bio = io.BytesIO(ent.get('txt', b''))
-    bio.seek(0)
-    return send_file(bio, as_attachment=True, download_name=ent.get('filename_base', 'extracted') + '.txt', mimetype='text/plain; charset=utf-8')
 
 
 def fix_urls_and_dois(text: str) -> str:
@@ -754,11 +588,8 @@ try:
 except Exception:
     HAVE_TRANSFORMERS = False
 
-# expose flag to templates
-try:
-    app.jinja_env.globals['have_transformers'] = HAVE_TRANSFORMERS
-except Exception:
-    pass
+# expose flag for external UIs (Streamlit/frontends may read this flag)
+# NOTE: Flask app was removed; templates are no longer used here.
 
 # simple translator cache
 _TRANSLATOR_CACHE = {}
@@ -769,91 +600,112 @@ def get_translator(src: str = 'en', tgt: str = 'ko'):
         return _TRANSLATOR_CACHE[key]
     if not HAVE_TRANSFORMERS:
         raise RuntimeError('googletrans 라이브러리가 설치되어 있지 않습니다. pip install googletrans==4.0.0-rc1')
-    g = _GoogleTranslator()
+    # Initialize Translator: prefer default constructor, fallback to service_urls if needed.
+    try:
+        g = _GoogleTranslator()
+    except Exception:
+        try:
+            g = _GoogleTranslator(service_urls=['translate.googleapis.com'])
+        except Exception as e:
+            # If we cannot instantiate the translator, provide a no-op translator that returns original text
+            def _noop(text, max_length=1024):
+                return [{'translation_text': text}]
+
+            _TRANSLATOR_CACHE[key] = _noop
+            return _noop
 
     def _translate_fn(text, max_length=1024):
         """Translate `text` using googletrans and return a list-like result compatible with the previous pipeline output.
-        Returns: [{'translation_text': 'translated string'}]
+        Always returns a list like: [{'translation_text': 'translated string'}]. On internal errors, returns the original text.
         """
         try:
-            res = g.translate(text, src=src, dest=tgt)
-            translated = getattr(res, 'text', str(res))
+            # If caller requested automatic source detection, omit the `src` arg
+            if src == 'auto' or src is None:
+                res = g.translate(text, dest=tgt)
+            else:
+                res = g.translate(text, src=src, dest=tgt)
+            # googletrans may return None or an object with .text; handle both
+            if res is None:
+                return [{'translation_text': text}]
+            translated = getattr(res, 'text', None)
+            if translated is None:
+                # sometimes googletrans returns a dict-like object
+                try:
+                    # attempt to coerce to string
+                    translated = str(res)
+                except Exception:
+                    translated = text
             return [{'translation_text': translated}]
-        except Exception as e:
-            # re-raise so caller can show an error and fallback behavior remains unchanged
-            raise
+        except Exception:
+            # On any translation error (including JSON parsing issues inside googletrans),
+            # return the original text so callers can continue safely.
+            return [{'translation_text': text}]
 
     _TRANSLATOR_CACHE[key] = _translate_fn
     return _translate_fn
 
 
-@app.route('/translate', methods=['POST'])
-def translate():
-    """Translate stored extracted TXT to target language and return as download.
-    Expects form fields: download_id, target (e.g. 'ko').
+def safe_translate(translator_fn, text: str, max_chunk: int = 800) -> str:
+    """Translate `text` in safe-sized chunks using `translator_fn`.
+    Splits on sentence boundaries when possible to keep chunks under `max_chunk` characters.
+    Returns the translated string (original text on failures).
     """
-    if not HAVE_TRANSFORMERS:
-        return render_template('index.html', error='번역 기능을 사용하려면 googletrans를 설치하세요: pip install "googletrans==4.0.0-rc1"')
+    if not text:
+        return text
 
-    download_id = request.form.get('download_id') or request.form.get('id')
-    target = request.form.get('target', 'ko')
-    if not download_id:
-        return render_template('index.html', error='download_id가 제공되지 않았습니다.')
-
-    ent = DOWNLOAD_STORE.get(download_id)
-    if not ent:
-        return render_template('index.html', error='요청하신 파일을 찾을 수 없습니다 (만료되었거나 잘못된 ID).'), 404
-
-    txt_bytes = ent.get('txt', b'')
-    try:
-        src_text = txt_bytes.decode('utf-8')
-    except Exception:
-        src_text = txt_bytes.decode('utf-8', errors='replace')
-
-    # split by paragraph to avoid tokenizer length issues
-    paras = re.split(r'\n{2,}', src_text)
-    try:
-        translator = get_translator('en', target)
-    except Exception as e:
-        return render_template('index.html', error=f'번역기 로드 실패: {e}')
-
-    translated_paras = []
-    for p in paras:
-        if not p.strip():
-            translated_paras.append('')
-            continue
+    # If short enough, translate in one call
+    if len(text) <= max_chunk:
         try:
-            out = translator(p, max_length=1024)
+            out = translator_fn(text)
             if isinstance(out, list) and out:
-                translated_paras.append(out[0].get('translation_text', str(out[0])))
-            elif isinstance(out, dict):
-                translated_paras.append(out.get('translation_text', str(out)))
-            else:
-                translated_paras.append(str(out))
+                return out[0].get('translation_text', str(out[0]))
+            if isinstance(out, dict):
+                return out.get('translation_text', str(out))
+            return str(out)
         except Exception:
-            # on failure, append original paragraph
-            translated_paras.append(p)
+            return text
 
-    translated_text = '\n\n'.join(translated_paras)
-    bio = io.BytesIO(translated_text.encode('utf-8'))
-    bio.seek(0)
-    out_name = ent.get('filename_base', 'extracted') + f'.{target}.txt'
-    return send_file(bio, as_attachment=True, download_name=out_name, mimetype='text/plain; charset=utf-8')
+    # Otherwise split into sentence-like pieces
+    pieces = re.split(r'(?<=[\.!?])\s+', text)
+    translated_pieces = []
+    cur = ''
+    for piece in pieces:
+        if not piece:
+            continue
+        if len(cur) + len(piece) + 1 <= max_chunk:
+            cur = (cur + ' ' + piece).strip()
+            continue
+        # translate current chunk
+        try:
+            out = translator_fn(cur)
+            if isinstance(out, list) and out:
+                translated_pieces.append(out[0].get('translation_text', str(out[0])))
+            elif isinstance(out, dict):
+                translated_pieces.append(out.get('translation_text', str(out)))
+            else:
+                translated_pieces.append(str(out))
+        except Exception:
+            translated_pieces.append(cur)
+        cur = piece
+
+    # last chunk
+    if cur:
+        try:
+            out = translator_fn(cur)
+            if isinstance(out, list) and out:
+                translated_pieces.append(out[0].get('translation_text', str(out[0])))
+            elif isinstance(out, dict):
+                translated_pieces.append(out.get('translation_text', str(out)))
+            else:
+                translated_pieces.append(str(out))
+        except Exception:
+            translated_pieces.append(cur)
+
+    return ' '.join(p.strip() for p in translated_pieces if p is not None)
+
+
+# Translation and web server routes removed — use the Streamlit front-end.
 
 
 if __name__ == '__main__':
-    # 개발용 간편 실행: 환경변수 USE_UVICORN=1 설정 시 uvicorn으로 실행
-    use_uv = os.environ.get('USE_UVICORN') == '1'
-    if use_uv:
-        try:
-            import uvicorn
-            if asgi_app is None:
-                print('asgiref 패키지가 없어 uvicorn을 사용할 수 없습니다. Flask 내장 서버로 실행합니다.')
-                app.run(host='0.0.0.0', port=5000, debug=True)
-            else:
-                uvicorn.run(asgi_app, host='0.0.0.0', port=int(os.environ.get('PORT', '8000')), log_level='info')
-        except Exception as e:
-            print(f'uvicorn 실행 실패 ({e}). Flask 내장 서버로 실행합니다.')
-            app.run(host='0.0.0.0', port=5000, debug=True)
-    else:
-        app.run(host='0.0.0.0', port=5000, debug=True)
+    print('pdfExtract.py provides extraction helpers. Run app_streamlit.py to start the Streamlit UI.')

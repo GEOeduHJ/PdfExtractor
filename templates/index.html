@@ -3,71 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PDF 텍스트 추출기</title>
+  <title>PDF 텍스트 추출기 (Flask UI removed)</title>
   <style>
     body { font-family: Arial, Helvetica, sans-serif; max-width:900px; margin:30px auto; line-height:1.6; padding:0 16px; }
-    textarea { width:100%; min-height:200px; font-family: monospace; white-space: pre-wrap; word-wrap: break-word; }
-    .container { padding:20px; border:1px solid #e0e0e0; border-radius:8px; background:#fafafa; }
-    .button { display:inline-block; padding:8px 12px; background:#007bff; color:#fff; border-radius:4px; text-decoration:none; margin-top:8px }
-    .error { color:#c62828; font-weight:600; margin:12px 0 }
-    .hint { color:#555; font-size:0.95em }
-    form { margin-top:12px }
-    details { margin:8px 0; padding:8px; border:1px solid #ddd; border-radius:6px; background:#fff }
-    summary { font-weight:700 }
   </style>
 </head>
 <body>
-  <div class="container">
-    <h1>PDF 텍스트 추출기</h1>
-    <p class="hint">PDF 파일을 업로드하면 내부 텍스트를 추출해서 보여줍니다. (스캔한 이미지 기반 PDF는 OCR이 필요합니다)</p>
-
-    {% if error %}
-      <div class="error">{{ error }}</div>
-    {% endif %}
-
-    <form action="{{ url_for('extract') }}" method="post" enctype="multipart/form-data">
-      <input type="file" name="file" accept="application/pdf" required>
-      <button type="submit" class="button">업로드 & 추출</button>
-    </form>
-
-    {% if extracted_text %}
-      <h2>추출된 텍스트 (전체)</h2>
-      <textarea readonly>{{ extracted_text }}</textarea>
-      <p>
-        <a class="button" href="{{ url_for('download_file', download_id=download_id) }}">텍스트 파일로 다운로드</a>
-      </p>
-
-      {% if have_transformers %}
-      <!-- Translation form (uses transformers MarianMT on server if available) -->
-      <form action="{{ url_for('translate') }}" method="post" style="display:inline-block; margin-left:8px;">
-        <input type="hidden" name="download_id" value="{{ download_id }}">
-        <label for="target" class="hint" style="margin-right:6px;">번역:</label>
-        <select name="target" id="target">
-          <option value="ko">한국어 (ko)</option>
-          <option value="ja">일본어 (ja)</option>
-          <option value="zh">중국어 (zh)</option>
-        </select>
-        <button type="submit" class="button">번역 후 다운로드</button>
-      </form>
-      {% else %}
-      <div class="hint" style="margin-top:8px">번역 기능을 사용하려면 서버에 <code>transformers</code> 및 <code>sentencepiece</code> 패키지를 설치하세요.</div>
-      {% endif %}
-
-      {% if extracted_pages %}
-        <h3>페이지별 추출</h3>
-        {% for page in extracted_pages %}
-          <details>
-            <summary>페이지 {{ loop.index }}</summary>
-            <textarea readonly>{{ page }}</textarea>
-          </details>
-        {% endfor %}
-      {% endif %}
-
-      <form action="{{ url_for('index') }}" method="get" style="margin-top:8px">
-        <button type="submit" class="button">새로 추출</button>
-      </form>
-    {% endif %}
-
+  <div style="padding:20px; border:1px solid #e0e0e0; border-radius:8px; background:#fafafa;">
+    <h1>Flask UI Removed</h1>
+    <p>This repository has been refactored to a Streamlit-first layout. Run the Streamlit app instead:
+      <pre>streamlit run app_streamlit.py</pre>
+    </p>
   </div>
 </body>
 </html>
